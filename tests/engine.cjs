@@ -1,0 +1,24 @@
+const fs=require('node:fs');const vm=require('node:vm');const assert=require('node:assert/strict');const ts=require('typescript');
+const compile=path=>ts.transpileModule(fs.readFileSync(path,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
+const sandbox={exports:{},require:(id)=>{if(id==='./roads')return roadsSandbox.exports;if(id==='./cars.json')return JSON.parse(fs.readFileSync('lib/cars.json','utf8'));throw Error(id);},AbortSignal,URLSearchParams,fetch:async()=>{throw Error('test upstream unavailable')}};
+const roadsSandbox={exports:{},AbortSignal,URL,URLSearchParams,Response,TextDecoder,console,fetch:(...args)=>sandbox.fetch(...args)};vm.runInNewContext(compile('lib/roads.ts'),roadsSandbox);vm.runInNewContext(compile('lib/engine.ts'),sandbox);const e=sandbox.exports;
+assert.equal(e.parseWidth('12 ft'),3.6576000000000004);assert.equal(e.parseWidth('3.5 m'),3.5);assert.equal(e.parseWidth('narrow'),null);assert.equal(e.parseWidth('0'),null);assert.equal(e.parseWidth('3;4'),null);
+assert.throws(()=>e.profile([],'live'),/No drivable roads/);
+const one=e.profile([{width:3,estimated:true,type:'service'}],'live');assert.equal(one.groups.length,1);assert.equal(one.groups[0].percent,100);assert.equal(one.minimum,3);
+const two=e.profile([{width:3,estimated:false,type:'service'},{width:9,estimated:false,type:'primary'}],'live');assert.equal(two.groups.length,2);assert.equal(two.groups[0].center,3);assert.equal(two.groups[1].center,9);
+const p=e.demoProfile();assert.equal(p.source,'demo');assert.equal(p.total,72);assert.equal(p.groups.length,3);assert.equal(p.groups.reduce((s,g)=>s+g.count,0),72);
+const matches=e.rank(p,8,5,'petrol');assert(matches.length>0);assert(matches.every(c=>c.price_lakh<=8&&c.seats>=5&&c.fuel==='petrol'));assert(matches.every((c,i)=>!i||matches[i-1].score>=c.score));assert(matches.every(c=>Number.isFinite(c.score)&&c.score>0&&c.score<=99));assert.equal(e.rank(p,1,9,'electric').length,0);
+(async()=>{
+ const r=roadsSandbox.exports;
+ const crossing=r.clipToRadius([{lat:0,lon:-.02},{lat:0,lon:.02}],0,0,500);assert.equal(crossing.length,2);assert(Math.abs(crossing[0].lon*111320+500)<.01);assert(Math.abs(crossing[1].lon*111320-500)<.01);
+ assert.equal(r.clipToRadius([{lat:.02,lon:-.02},{lat:.02,lon:.02}],0,0,500).length,0);
+ const fixture={elements:[{type:'node',id:1,lat:0,lon:-.002},{type:'node',id:2,lat:0,lon:.002},{type:'node',id:3,lat:.02,lon:.02},{type:'node',id:4,lat:.021,lon:.021},{type:'way',id:10,nodes:[1,2],tags:{highway:'residential',width:'12 ft'}},{type:'way',id:11,nodes:[1,2],tags:{highway:'footway'}},{type:'way',id:12,nodes:[1,2],tags:{highway:'residential',access:'no'}},{type:'way',id:13,nodes:[3,4],tags:{highway:'residential'}}]};
+ const normalized=r.normalizeRoads(fixture,0,0,500);assert.equal(normalized.length,1);assert.equal(normalized[0].id,10);
+ assert.throws(()=>r.normalizeRoads({elements:[],remark:'runtime timeout'},0,0,500),/Incomplete/);
+ let requests=0;sandbox.fetch=async()=>{requests++;return new Response(JSON.stringify(fixture),{headers:{'Content-Type':'application/json'}});};
+ const live=await e.liveProfile(0,0,500);assert.equal(live.source,'live');assert.equal(live.estimated,0);assert.equal(live.total,1);assert.equal(live.provider,'OpenStreetMap map API');assert(live.fetchedAt);await e.liveProfile(0,0,500);assert.equal(requests,1,'Repeated area should use cache');
+ sandbox.fetch=async()=>{throw Error('upstream unavailable')};await assert.rejects(e.liveProfile(12.9,77.6,500),/Could not reach/);
+ let attempts=0;sandbox.fetch=async()=>{attempts++;if(attempts===1)return new Response('Busy',{status:502});return new Response(JSON.stringify({elements:[{type:'way',id:20,tags:{width:'4 m',highway:'residential'},geometry:[{lat:1,lon:.999},{lat:1,lon:1.001}]}]}));};
+ const fallback=await e.liveProfile(1,1,500);assert.equal(attempts,2);assert.equal(fallback.total,1);assert.equal(fallback.source,'live');assert.equal(fallback.provider,'overpass-api.de');
+ console.log('PASS: units, edge samples, clustering, hard filters, radius clipping, OSM node reconstruction, access exclusions, cache, real-data fallback, and honest upstream errors.');
+})().catch(e=>{console.error(e);process.exitCode=1;});
